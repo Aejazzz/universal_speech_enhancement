@@ -191,17 +191,39 @@ def main() -> None:
     top_gain = df.sort_values("dnsmos_delta", ascending=False).head(20)
     top_gain.to_csv(out_dir / "top20_dnsmos_gain.csv", index=False)
 
+    def _md_table(frame: pd.DataFrame) -> str:
+        try:
+            return frame.to_markdown(index=False)
+        except Exception:
+            return frame.to_csv(index=False)
+
     with (out_dir / "report.md").open("w", encoding="utf-8") as fh:
         fh.write("# Blind-Test Batch Evaluation (Full)\n\n")
         fh.write(f"- Files processed: **{len(df)}**\n")
         fh.write(f"- Chosen-is-top-rank rate: **{df['chosen_is_top_rank'].mean()*100:.2f}%**\n")
         fh.write(f"- Mean DNSMOS delta: **{df['dnsmos_delta'].mean():.4f}**\n")
+        fh.write(f"- Mean SIG delta: **{df['sig_delta'].mean():.4f}**\n")
+        fh.write(f"- Mean BAK delta: **{df['bak_delta'].mean():.4f}**\n")
         fh.write(f"- Mean UTMOS delta: **{df['utmos_delta'].mean():.4f}**\n")
         fh.write(f"- Pareto dominated selections: **{int((df['pareto_dominated_count'] > 0).sum())}**\n\n")
         fh.write("## Expert Leaderboard\n\n")
-        fh.write(leaderboard.to_markdown(index=False))
+        fh.write(_md_table(leaderboard))
         fh.write("\n\n## Top 20 DNSMOS Gains\n\n")
-        fh.write(top_gain[["file", "chosen_expert", "chosen_strength", "dnsmos_delta", "sig_delta", "bak_delta", "utmos_delta"]].to_markdown(index=False))
+        fh.write(
+            _md_table(
+                top_gain[
+                    [
+                        "file",
+                        "chosen_expert",
+                        "chosen_strength",
+                        "dnsmos_delta",
+                        "sig_delta",
+                        "bak_delta",
+                        "utmos_delta",
+                    ]
+                ]
+            )
+        )
         fh.write("\n")
 
     print(f"Wrote {out_dir / 'summary.csv'}")
