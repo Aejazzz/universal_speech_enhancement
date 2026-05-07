@@ -27,3 +27,4 @@ noisereduce
 tensorboard
 deepfilternet
 gradio_client
+python-pptx
