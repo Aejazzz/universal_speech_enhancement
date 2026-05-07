@@ -14,6 +14,11 @@ _UTMOS_MODEL = None
 _UTMOS_LOAD_FAILED = False
 
 
+def utmos_is_reliable() -> bool:
+    """Whether UTMOS scores come from the real predictor (not heuristic fallback)."""
+    return _UTMOS_MODEL is not None and not _UTMOS_LOAD_FAILED
+
+
 def si_sdr(reference: np.ndarray, estimate: np.ndarray) -> float:
     reference = reference - np.mean(reference)
     estimate = estimate - np.mean(estimate)

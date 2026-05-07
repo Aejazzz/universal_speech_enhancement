@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 from distortion_analyzer.model import DistortionAnalyzer
 from distortion_analyzer.routing_features import format_reason, summarize_for_dashboard
 from enhancement_experts.factory import build_experts
-from evaluation.metrics import compute_metrics, dnsmos_full, dnsmos_score, utmos_score
+from evaluation.metrics import compute_metrics, dnsmos_full, dnsmos_score, utmos_is_reliable, utmos_score
 from policy_agent.model import ACTIONS, TransformerPolicyAgent
 from visualizations.plots import save_policy_plot, save_spectrogram_plot, save_waveform_plot
 
@@ -122,16 +122,20 @@ class EnhancementPipeline:
           * **DNSMOS P.835** OVRL/SIG/BAK (Microsoft) — measures perceived signal/background quality
           * **UTMOS22 strong** (Saeki 2022, sarulab) — orthogonal artifact detector
 
-        Combined ``rank_score = 0.45·OVRL + 0.20·SIG + 0.15·BAK + 0.20·UTMOS``. UTMOS is a
-        different-architecture predictor trained on different MOS data, so adding it catches
-        artifacts (musical noise, over-suppression) that DNSMOS misses. A "do no harm" margin
-        keeps BYPASS preferred on near-ties.
+        Combined ``rank_score`` uses DNSMOS P.835 OVRL/SIG/BAK plus UTMOS22 when the UTMOS
+        model loaded successfully; otherwise UTMOS is omitted from the blend (heuristic fallback
+        is not trusted for routing). A "do no harm" margin keeps BYPASS preferred on near-ties.
 
         Returns ``(expert_name, strength, enhanced_waveform, candidates, reason)``.
         """
 
         def _score_pair(wave: np.ndarray) -> tuple[Dict[str, float], float]:
-            return dnsmos_full(wave, sr), float(utmos_score(wave, sr))
+            # Score the same signal version that will be emitted (post-limiter), otherwise
+            # route selection and final metrics can disagree on edge cases.
+            wave_eval = soft_limiter(np.asarray(wave, dtype=np.float32), ceiling_db=-1.0)
+            return dnsmos_full(wave_eval, sr), float(utmos_score(wave_eval, sr))
+
+        utmos_reliable = bool(utmos_is_reliable())
 
         def _ranking_score(d: Dict[str, float], utmos: float) -> float:
             """Weighted combination of DNSMOS P.835 components and UTMOS22.
@@ -143,7 +147,10 @@ class EnhancementPipeline:
             ovrl = float(d.get("ovrl", 3.0))
             sig = float(d.get("sig", 3.0))
             bak = float(d.get("bak", 3.0))
-            return 0.45 * ovrl + 0.20 * sig + 0.15 * bak + 0.20 * float(utmos)
+            if utmos_reliable:
+                return 0.45 * ovrl + 0.20 * sig + 0.15 * bak + 0.20 * float(utmos)
+            # If UTMOS model failed to load, ignore heuristic UTMOS in routing decisions.
+            return 0.60 * ovrl + 0.25 * sig + 0.15 * bak
 
         bypass_dns, bypass_utmos = _score_pair(waveform)
         candidates: list[dict[str, Any]] = [
@@ -180,6 +187,8 @@ class EnhancementPipeline:
                             enh = enh[: len(waveform)].copy()
                         else:
                             enh = np.pad(enh, (0, len(waveform) - len(enh)))
+                    # Score with a single limiter pass inside _score_pair; cache unlimited audio
+                    # so run()'s final soft_limiter matches production (one pass total).
                     dns, ut = _score_pair(enh)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("dynamic candidate %s@%.2f failed: %s", name, s, exc)
@@ -206,12 +215,13 @@ class EnhancementPipeline:
         if best["expert"] == "BYPASS":
             reason = (
                 f"BYPASS rank={bypass_rank:.3f} (OVRL={bypass_dns.get('ovrl'):.3f}, "
-                f"UTMOS={bypass_utmos:.3f}) - input is best of {len(candidates)} candidates"
+                f"UTMOS={bypass_utmos:.3f}, utmos_reliable={utmos_reliable}) - input is best of {len(candidates)} candidates"
             )
         else:
             reason = (
                 f"{best['expert']}@{best['strength']:.2f} rank={best['rank_score']:.3f} "
-                f"(OVRL={best['dnsmos']:.3f}, UTMOS={best['utmos']:.3f}) beat BYPASS rank={bypass_rank:.3f}"
+                f"(OVRL={best['dnsmos']:.3f}, UTMOS={best['utmos']:.3f}, utmos_reliable={utmos_reliable}) "
+                f"beat BYPASS rank={bypass_rank:.3f}"
             )
         return best["expert"], float(best["strength"]), chosen_audio, candidates, reason
 
