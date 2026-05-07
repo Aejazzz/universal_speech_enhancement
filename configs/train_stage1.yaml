@@ -1,0 +1,27 @@
+system:
+  device: cuda
+  mixed_precision: true
+  sample_rate: 16000
+  dataset_root: "C:/Users/jsm10/OneDrive - Amrita vishwa vidyapeetham/agentic-speech-enhancement/datasets"
+  output_root: "outputs"
+  mossformer_checkpoint: ""
+  policy_checkpoint: "checkpoints/policy_best.pt"
+
+policy:
+  wavlm_name: "microsoft/wavlm-base-plus"
+  hidden_dim: 512
+  num_heads: 8
+  num_layers: 4
+  dropout: 0.1
+  num_actions: 4
+
+training:
+  batch_size: 4
+  epochs: 5
+  lr: 1e-4
+  weight_decay: 1e-5
+  early_stopping_patience: 3
+  gradient_clip_norm: 1.0
+  distributed: false
+  train_manifest: "outputs/manifests/train.csv"
+  val_manifest: "outputs/manifests/val.csv"

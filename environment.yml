@@ -1,0 +1,11 @@
+name: universal-speech-enhancement
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - cudatoolkit
+  - ffmpeg
+  - pip:
+      - -r requirements.txt

@@ -1,0 +1,2 @@
+# Optional extras that may require Python >=3.10 or source install.
+git+https://github.com/resemble-ai/resemble-enhance.git

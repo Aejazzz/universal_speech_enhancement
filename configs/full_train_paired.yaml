@@ -1,0 +1,29 @@
+# Full policy training on **paired noisy/clean** manifests with composite-score oracle labels.
+# Uses a frozen WavLM backbone + small trainable routing head — see policy_agent/model.py docstring.
+system:
+  device: cuda
+  mixed_precision: true
+  sample_rate: 16000
+  dataset_root: "C:/Users/jsm10/OneDrive - Amrita vishwa vidyapeetham/agentic-speech-enhancement/datasets"
+  output_root: "outputs"
+  mossformer_checkpoint: ""
+  policy_checkpoint: "checkpoints/policy_best.pt"
+
+policy:
+  wavlm_name: "microsoft/wavlm-base-plus"
+  hidden_dim: 384
+  num_heads: 8         # legacy field — ignored by current head, kept for config compatibility
+  num_layers: 3        # depth of the residual MLP routing trunk
+  dropout: 0.30
+  num_actions: 4
+
+training:
+  batch_size: 16
+  epochs: 60
+  lr: 2e-4
+  weight_decay: 5e-4
+  early_stopping_patience: 12
+  gradient_clip_norm: 1.0
+  distributed: false
+  train_manifest: "outputs/manifests/paired_train_oracle.csv"
+  val_manifest: "outputs/manifests/paired_val_oracle.csv"
