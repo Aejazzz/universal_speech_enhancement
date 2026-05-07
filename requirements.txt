@@ -21,6 +21,9 @@ einops
 pesq
 pystoi
 speechmos
+pyloudnorm
+nara-wpe
+noisereduce
 tensorboard
 deepfilternet
 gradio_client

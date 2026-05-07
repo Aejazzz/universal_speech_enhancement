@@ -52,12 +52,21 @@ def main() -> None:
                 return default
 
         print(
-            f"[verify {i+1:02d}] oracle={oracle:<14s} chosen={chosen:<14s} "
-            f"strength={routing['strength']:.2f} confidence={routing['confidence']:.2f} "
-            f"d_pesq={_f(improvement.get('pesq')):+0.3f} d_stoi={_f(improvement.get('stoi')):+0.3f} "
-            f"d_dnsmos={_f(improvement.get('dnsmos')):+0.3f} "
+            f"[verify {i+1:02d}] oracle={oracle:<14s} chosen={chosen:<19s} "
+            f"strength={routing['strength']:.2f} d_dnsmos={_f(improvement.get('dnsmos')):+0.3f} "
+            f"d_sig={_f(improvement.get('dnsmos_sig')):+0.3f} d_bak={_f(improvement.get('dnsmos_bak')):+0.3f} "
             f"d_utmos={_f(improvement.get('utmos')):+0.3f}"
         )
+        cands = routing.get("dynamic_candidates") or []
+        if cands and i < 3:  # show details for the first few clips so we can see all experts compete
+            top = sorted(cands, key=lambda c: -float(c.get("rank_score", c.get("dnsmos") or 0.0)))
+            print("           candidates (top 6):")
+            for c in top[:6]:
+                rs = c.get("rank_score")
+                ovrl = c.get("dnsmos")
+                sig = c.get("dnsmos_sig")
+                bak = c.get("dnsmos_bak")
+                print(f"             - {c['expert']:<19s} s={c['strength']:.2f} rank={rs if rs is None else f'{rs:.3f}':<7} OVRL={ovrl if ovrl is None else f'{ovrl:.3f}':<7} SIG={sig if sig is None else f'{sig:.3f}':<7} BAK={bak if bak is None else f'{bak:.3f}'}")
         rows.append(
             {
                 "noisy": noisy_path,

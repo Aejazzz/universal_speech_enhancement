@@ -4,15 +4,19 @@ Adaptive multi-expert speech enhancement platform with a transformer routing pol
 
 ## Features
 
-- Real expert routing actions: `DeepFilterNet3`, `ResembleEnhance`, `MossFormer2`, `BYPASS`
-- WavLM embedding extraction for semantic/acoustic conditioning
-- CRNN distortion analyzer on mel spectrograms
-- Transformer policy agent with confidence outputs and refinement control
-- Quality evaluation with `DNSMOS` (placeholder hook + API point), `UTMOS` (model hook), `PESQ`, `STOI`, `SI-SDR`
-- Research-grade plots (waveforms, spectrograms, confidence, routing distribution)
-- FastAPI backend with async endpoints and model caching
-- React + Tailwind + Framer Motion frontend dashboard
-- Training/evaluation/inference scripts, config-driven execution, TensorBoard logging
+- **6 enhancement experts** competing per-clip:
+  - **Neural:** `DeepFilterNet3` (deep CRN, ICASSP'23), `ResembleEnhance` (T2T diffusion), `MossFormer2`
+  - **Classical FFT:** `SpectralGate` (Sainburg `noisereduce` algorithm), `WienerFilter` (Ephraim-Malah decision-directed, 1984), `SpectralSubtraction` (Boll, 1979 with over-subtraction + spectral floor)
+  - `BYPASS` baseline
+- **Frozen WavLM-base-plus** with multi-layer pooling (layers 6/9/12) feeding a small residual MLP routing trunk (~2.67M trainable params)
+- **CRNN distortion analyzer** outputting 6 routing features
+- **Dynamic "speculate-and-measure" router** at inference: enhances with every active expert at a strength sweep, scores all candidates with DNSMOS (0.6·OVRL + 0.25·SIG + 0.15·BAK), and picks the top-ranked candidate. A "do no harm" margin keeps BYPASS preferred on near-ties.
+- **ITU-R BS.1770 preprocessing**: DC offset removal, 60 Hz Butterworth high-pass for rumble, loudness normalisation to -23 LUFS via `pyloudnorm` (peak-norm fallback). Brick-wall limiter at -1 dBFS on the output.
+- **Full DNSMOS P.835 + P.808** breakdown (SIG/BAK/OVRL/P808) via the official `speechmos` ONNX models, plus `UTMOS`, `PESQ`, `STOI`, `SI-SDR`.
+- **Research-grade plots**: waveform A/B, three-panel spectrogram (orig / enhanced / removed-noise on a shared dB scale), policy probabilities.
+- **FastAPI** backend with full telemetry: trained-policy advice, complete dynamic candidate leaderboard, decision rationale, preprocessing report.
+- **React + Tailwind + Framer Motion** dashboard with DNSMOS scorecards (animated bars + delta pills), candidate leaderboard with crown for winner, preprocessing block, audio A/B player.
+- Training/evaluation/inference scripts, config-driven execution, TensorBoard logging.
 
 ## Project Layout
 

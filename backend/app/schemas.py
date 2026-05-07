@@ -19,6 +19,8 @@ class RoutingDecision(BaseModel):
     dynamic_candidates: Optional[List[Dict[str, Any]]] = None
     decision_reason: Optional[str] = None
     dynamic_routing: Optional[bool] = None
+    preprocess: Optional[Dict[str, Any]] = None
+    timings: Optional[Dict[str, Any]] = None
 
 
 class MetricsResult(BaseModel):

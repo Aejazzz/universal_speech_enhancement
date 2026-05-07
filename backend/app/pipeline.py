@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict
@@ -12,18 +13,32 @@ import torch
 
 from backend.app.audio import load_audio, save_audio
 from backend.app.config import AppConfig
+from backend.app.preprocess import preprocess, soft_limiter
 
 logger = logging.getLogger(__name__)
 from distortion_analyzer.model import DistortionAnalyzer
 from distortion_analyzer.routing_features import format_reason, summarize_for_dashboard
 from enhancement_experts.factory import build_experts
-from evaluation.metrics import compute_metrics, dnsmos_score
+from evaluation.metrics import compute_metrics, dnsmos_full, dnsmos_score, utmos_score
 from policy_agent.model import ACTIONS, TransformerPolicyAgent
 from visualizations.plots import save_policy_plot, save_spectrogram_plot, save_waveform_plot
 
 # Margin (DNSMOS OVRL) by which a non-BYPASS candidate must beat BYPASS to be picked.
 # Mirrors the "do no harm" margin used in scripts/rederive_oracle_labels.py.
 _DYNAMIC_BYPASS_MARGIN = 0.02
+
+# All experts the dynamic router is allowed to consider, in priority order. Classical experts
+# are FFT-only and always available; neural experts depend on checkpoints / external installs.
+_DYNAMIC_CANDIDATE_ORDER = (
+    "DeepFilterNet3",
+    "WPEDereverb",
+    "NoiseReduce",
+    "SpectralGate",
+    "WienerFilter",
+    "SpectralSubtraction",
+    "ResembleEnhance",
+    "MossFormer2",
+)
 
 
 class EnhancementPipeline:
@@ -69,14 +84,20 @@ class EnhancementPipeline:
     def _expert_is_active(self, name: str) -> bool:
         """Whether a given expert can produce a meaningfully different output.
 
-        Resemble Enhance / MossFormer2 silently fall back to identity when their
-        checkpoints are not installed; including them in the dynamic candidate set
-        would only inflate latency without giving the router useful options.
+        Classical FFT experts (SpectralGate, WienerFilter, SpectralSubtraction) are always
+        active — they need no checkpoints. Neural experts only count if they actually have
+        usable weights / packages installed; otherwise including them in the dynamic
+        candidate set would only inflate latency.
         """
         if name == "BYPASS":
             return True
-        if name == "DeepFilterNet3":
+        if name in {"SpectralGate", "WienerFilter", "SpectralSubtraction"}:
             return True
+        if name == "DeepFilterNet3":
+            return True  # public model is always downloadable on first call
+        if name in {"WPEDereverb", "NoiseReduce"}:
+            expert = self.experts.get(name)
+            return bool(getattr(expert, "available", False))
         if name == "MossFormer2":
             expert = self.experts.get("MossFormer2")
             return getattr(expert, "model", None) is not None
@@ -95,31 +116,61 @@ class EnhancementPipeline:
         policy_strength: float,
     ) -> tuple[str, float, np.ndarray, list[dict[str, Any]], str]:
         """
-        Speculate-and-measure: enhance with every active non-BYPASS expert at a small
-        strength sweep, score every candidate (including BYPASS) with DNSMOS OVRL,
-        and pick the maximum. A small bias is given to BYPASS so we don't swap in a
-        barely-better enhancement that may introduce audible artifacts.
+        Speculate-and-measure across every active expert at a strength sweep.
+
+        Each candidate gets:
+          * **DNSMOS P.835** OVRL/SIG/BAK (Microsoft) — measures perceived signal/background quality
+          * **UTMOS22 strong** (Saeki 2022, sarulab) — orthogonal artifact detector
+
+        Combined ``rank_score = 0.45·OVRL + 0.20·SIG + 0.15·BAK + 0.20·UTMOS``. UTMOS is a
+        different-architecture predictor trained on different MOS data, so adding it catches
+        artifacts (musical noise, over-suppression) that DNSMOS misses. A "do no harm" margin
+        keeps BYPASS preferred on near-ties.
 
         Returns ``(expert_name, strength, enhanced_waveform, candidates, reason)``.
         """
-        dnsmos_input = float(dnsmos_score(waveform, sr))
+
+        def _score_pair(wave: np.ndarray) -> tuple[Dict[str, float], float]:
+            return dnsmos_full(wave, sr), float(utmos_score(wave, sr))
+
+        def _ranking_score(d: Dict[str, float], utmos: float) -> float:
+            """Weighted combination of DNSMOS P.835 components and UTMOS22.
+
+            Signal-quality components (SIG, OVRL, UTMOS) get most of the weight; BAK alone
+            isn't enough — an over-aggressive enhancer can crush background to near-zero
+            without improving the actual speech.
+            """
+            ovrl = float(d.get("ovrl", 3.0))
+            sig = float(d.get("sig", 3.0))
+            bak = float(d.get("bak", 3.0))
+            return 0.45 * ovrl + 0.20 * sig + 0.15 * bak + 0.20 * float(utmos)
+
+        bypass_dns, bypass_utmos = _score_pair(waveform)
         candidates: list[dict[str, Any]] = [
-            {"expert": "BYPASS", "strength": 0.0, "dnsmos": dnsmos_input}
+            {
+                "expert": "BYPASS",
+                "strength": 0.0,
+                "dnsmos": bypass_dns.get("ovrl"),
+                "dnsmos_sig": bypass_dns.get("sig"),
+                "dnsmos_bak": bypass_dns.get("bak"),
+                "utmos": bypass_utmos,
+                "rank_score": _ranking_score(bypass_dns, bypass_utmos),
+            }
         ]
         cached: dict[tuple[str, float], np.ndarray] = {("BYPASS", 0.0): waveform}
 
-        # Strength sweep: include the policy's recommended strength (clamped) plus two
-        # standard checkpoints. Using a set deduplicates collisions.
-        sweep = sorted({
-            float(np.clip(policy_strength, 0.4, 0.95)),
-            0.7,
-            0.95,
-        })
+        # Strength sweep — moderate to aggressive. UTMOS in the rank score automatically
+        # penalises over-aggressive enhancers that introduce artifacts, so we can safely
+        # try strong settings: 0.55 (gentle) / 0.80 (firm) / 0.95 (full).
+        policy_clamped = float(np.clip(policy_strength, 0.4, 0.95))
+        sweep = sorted({policy_clamped, 0.55, 0.80, 0.95})
 
-        for name in ("DeepFilterNet3", "ResembleEnhance", "MossFormer2"):
+        for name in _DYNAMIC_CANDIDATE_ORDER:
             if not self._expert_is_active(name):
                 continue
-            expert = self.experts[name]
+            expert = self.experts.get(name)
+            if expert is None:
+                continue
             for s in sweep:
                 try:
                     enh = expert.enhance(waveform, sr, float(s))
@@ -129,31 +180,38 @@ class EnhancementPipeline:
                             enh = enh[: len(waveform)].copy()
                         else:
                             enh = np.pad(enh, (0, len(waveform) - len(enh)))
-                    score = float(dnsmos_score(enh, sr))
+                    dns, ut = _score_pair(enh)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("dynamic candidate %s@%.2f failed: %s", name, s, exc)
                     continue
-                candidates.append({"expert": name, "strength": float(s), "dnsmos": score})
+                candidates.append({
+                    "expert": name,
+                    "strength": float(s),
+                    "dnsmos": dns.get("ovrl"),
+                    "dnsmos_sig": dns.get("sig"),
+                    "dnsmos_bak": dns.get("bak"),
+                    "utmos": ut,
+                    "rank_score": _ranking_score(dns, ut),
+                })
                 cached[(name, float(s))] = enh
 
-        # Pick the maximum-DNSMOS candidate, but penalize non-BYPASS by the margin so
-        # BYPASS is preferred on ties / near-ties (do-no-harm).
+        # Pick the max rank_score, but penalize non-BYPASS by the margin so BYPASS wins on near-ties.
         def _key(c: dict[str, Any]) -> float:
             penalty = 0.0 if c["expert"] == "BYPASS" else _DYNAMIC_BYPASS_MARGIN
-            return float(c["dnsmos"]) - penalty
+            return float(c["rank_score"]) - penalty
 
         best = max(candidates, key=_key)
         chosen_audio = cached[(best["expert"], float(best["strength"]))]
-        bypass_score = candidates[0]["dnsmos"]
+        bypass_rank = candidates[0]["rank_score"]
         if best["expert"] == "BYPASS":
             reason = (
-                f"BYPASS OVRL={bypass_score:.3f} - input is already best of "
-                f"{len(candidates)} candidates"
+                f"BYPASS rank={bypass_rank:.3f} (OVRL={bypass_dns.get('ovrl'):.3f}, "
+                f"UTMOS={bypass_utmos:.3f}) - input is best of {len(candidates)} candidates"
             )
         else:
             reason = (
-                f"{best['expert']}@{best['strength']:.2f} OVRL={best['dnsmos']:.3f} "
-                f"beat BYPASS OVRL={bypass_score:.3f} (margin={_DYNAMIC_BYPASS_MARGIN:.3f})"
+                f"{best['expert']}@{best['strength']:.2f} rank={best['rank_score']:.3f} "
+                f"(OVRL={best['dnsmos']:.3f}, UTMOS={best['utmos']:.3f}) beat BYPASS rank={bypass_rank:.3f}"
             )
         return best["expert"], float(best["strength"]), chosen_audio, candidates, reason
 
@@ -176,13 +234,26 @@ class EnhancementPipeline:
         out_root = Path(self.config.system.output_root) / run_id
         out_root.mkdir(parents=True, exist_ok=True)
 
-        waveform, sr = load_audio(input_path, self.config.system.sample_rate)
+        t_start = time.perf_counter()
+        raw_waveform, sr = load_audio(input_path, self.config.system.sample_rate)
+        t_load = time.perf_counter()
+        # Preprocess: DC removal, 60Hz HPF, ITU-R BS.1770 loudness norm to -23 LUFS (or peak).
+        waveform, preprocess_report = preprocess(raw_waveform, sr)
+        logger.info(
+            "Preprocess: dc=%.4f rms=%.1f->%.1fdB lufs=%s->%s",
+            preprocess_report.dc_offset_removed,
+            preprocess_report.rms_db_in,
+            preprocess_report.rms_db_out,
+            preprocess_report.loudness_lufs_in,
+            preprocess_report.loudness_lufs_out,
+        )
         distortion_summary = summarize_for_dashboard(waveform, sr)
         distortion = self.distortion_model.predict(waveform, sr).to(self.device).unsqueeze(0)
         wav_tensor = torch.tensor(waveform, dtype=torch.float32, device=self.device).unsqueeze(0)
 
         with torch.amp.autocast(device_type="cuda", enabled=self.config.system.mixed_precision and self.device == "cuda"):
             policy_output = self.policy(wav_tensor, distortion)
+        t_policy = time.perf_counter()
 
         policy_advice = {
             "expert": ACTIONS[policy_output.expert_idx],
@@ -206,10 +277,26 @@ class EnhancementPipeline:
         if policy_output.refine and expert_name != "BYPASS":
             enhanced = self.experts[expert_name].enhance(enhanced, sr, min(1.0, chosen_strength + 0.1))
 
+        # Post: brick-wall limiter at -1 dBFS so no expert ships an output that clips.
+        enhanced = soft_limiter(enhanced.astype(np.float32), ceiling_db=-1.0)
+        t_enhance = time.perf_counter()
+
         reference = None
         if reference_path:
             reference, _ = load_audio(reference_path, sr)
         metrics = compute_metrics(waveform, enhanced, sr, reference)
+        t_metrics = time.perf_counter()
+
+        timings = {
+            "load_ms": round((t_load - t_start) * 1000, 1),
+            "policy_ms": round((t_policy - t_load) * 1000, 1),
+            "enhance_ms": round((t_enhance - t_policy) * 1000, 1),
+            "metrics_ms": round((t_metrics - t_enhance) * 1000, 1),
+            "total_ms": round((t_metrics - t_start) * 1000, 1),
+            "audio_seconds": round(len(waveform) / sr, 2),
+            "rtf": round((t_metrics - t_start) / max(len(waveform) / sr, 1e-3), 3),
+        }
+        logger.info("timings: %s", timings)
 
         output_audio_path = str(out_root / "enhanced.wav")
         metrics_path = str(out_root / "metrics.json")
@@ -239,6 +326,8 @@ class EnhancementPipeline:
             "dynamic_candidates": dynamic_candidates,
             "decision_reason": decision_reason,
             "dynamic_routing": bool(self.config.system.dynamic_routing),
+            "preprocess": preprocess_report.as_dict(),
+            "timings": timings,
         }
         with Path(routing_path).open("w", encoding="utf-8") as handle:
             json.dump(routing, handle, indent=2)

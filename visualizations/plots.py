@@ -23,13 +23,43 @@ def save_waveform_plot(original: np.ndarray, enhanced: np.ndarray, sr: int, out_
 
 
 def save_spectrogram_plot(original: np.ndarray, enhanced: np.ndarray, sr: int, out_path: str) -> None:
+    """Original / Enhanced / Removed-noise spectrograms on a shared dB scale.
+
+    The third panel is the difference (|orig| - |enh|) clipped to non-negative — i.e. the
+    energy the enhancer removed. This makes the impact of routing immediately obvious.
+    """
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    for idx, (audio, title) in enumerate([(original, "Original"), (enhanced, "Enhanced")]):
-        spec = librosa.amplitude_to_db(np.abs(librosa.stft(audio)), ref=np.max)
-        img = librosa.display.specshow(spec, sr=sr, x_axis="time", y_axis="log", ax=axes[idx], cmap="magma")
-        axes[idx].set_title(f"{title} Spectrogram")
-        fig.colorbar(img, ax=axes[idx], format="%+2.0f dB")
+    n = min(len(original), len(enhanced))
+    o = original[:n]
+    e = enhanced[:n]
+
+    Mo = np.abs(librosa.stft(o))
+    Me = np.abs(librosa.stft(e))
+    Mdiff = np.maximum(Mo - Me, 0.0)
+
+    ref = max(Mo.max(), Me.max(), 1e-8)
+    spec_o = librosa.amplitude_to_db(Mo, ref=ref)
+    spec_e = librosa.amplitude_to_db(Me, ref=ref)
+    spec_d = librosa.amplitude_to_db(Mdiff + 1e-8, ref=ref)
+
+    vmin, vmax = -80, 0
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    img0 = librosa.display.specshow(
+        spec_o, sr=sr, x_axis="time", y_axis="log", ax=axes[0], cmap="magma", vmin=vmin, vmax=vmax
+    )
+    axes[0].set_title("Original")
+    fig.colorbar(img0, ax=axes[0], format="%+2.0f dB")
+    img1 = librosa.display.specshow(
+        spec_e, sr=sr, x_axis="time", y_axis="log", ax=axes[1], cmap="magma", vmin=vmin, vmax=vmax
+    )
+    axes[1].set_title("Enhanced")
+    fig.colorbar(img1, ax=axes[1], format="%+2.0f dB")
+    img2 = librosa.display.specshow(
+        spec_d, sr=sr, x_axis="time", y_axis="log", ax=axes[2], cmap="viridis", vmin=vmin, vmax=vmax
+    )
+    axes[2].set_title("Removed (Original − Enhanced)")
+    fig.colorbar(img2, ax=axes[2], format="%+2.0f dB")
     plt.tight_layout()
     fig.savefig(out_path, dpi=180)
     plt.close(fig)
